@@ -1,0 +1,23 @@
+name: Monthly Inventory Snapshot
+
+on:
+  schedule:
+    - cron: '1 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run inventory snapshot
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+        run: node scripts/fetch-snapshot.js
