@@ -31,6 +31,7 @@ export default function InventoryTracker() {
   var [items, setItems] = useState([]);
   var [cmpItems, setCmpItems] = useState([]);
   var [search, setSearch] = useState("");
+  var [warehouseFilter, setWarehouseFilter] = useState("");
   var [loading, setLoading] = useState(false);
   var [sortBy, setSortBy] = useState("name");
   var [sortDir, setSortDir] = useState("asc");
@@ -123,6 +124,7 @@ export default function InventoryTracker() {
                   snapshot_id: snapshot.id, product_id: pid,
                   sku: p.sku || "", name: p.name || "", ean: p.ean || "",
                   stock: stockSum, price: Number(priceVals[0]) || 0,
+                  warehouse: inv.name || String(inv.inventory_id),
                 };
               });
 
@@ -159,6 +161,7 @@ export default function InventoryTracker() {
 
   function getMerged() {
     var filtered = items.filter(function(i) {
+      if (warehouseFilter && (i.warehouse || "") !== warehouseFilter) return false;
       if (!search) return true;
       var s = search.toLowerCase();
       return (i.name || "").toLowerCase().includes(s) || (i.sku || "").toLowerCase().includes(s);
@@ -184,13 +187,53 @@ export default function InventoryTracker() {
     else { setSortBy(col); setSortDir("asc"); }
   }
 
+  function downloadCSV() {
+    var rows = getMerged();
+    var hasCmp = cmpSnap && cmpItems.length > 0;
+    var headers = ["SKU", "Nazwa", "EAN", "Magazyn", "Stan", "Cena"];
+    if (hasCmp) headers = ["SKU", "Nazwa", "EAN", "Magazyn", "Stan", "Poprzedni stan", "Zmiana", "Cena"];
+
+    var csvLines = [headers.join(";")];
+    rows.forEach(function(r) {
+      var name = (r.name || "").replace(/;/g, ",").replace(/"/g, '""');
+      var wh = (r.warehouse || "").replace(/;/g, ",").replace(/"/g, '""');
+      var line = [
+        r.sku || "",
+        '"' + name + '"',
+        r.ean || "",
+        '"' + wh + '"',
+        r.stock || 0,
+      ];
+      if (hasCmp) {
+        line.push(r.prev_stock != null ? r.prev_stock : "");
+        line.push(r.diff != null ? r.diff : "");
+      }
+      line.push((r.price || 0).toFixed(2).replace(".", ","));
+      csvLines.push(line.join(";"));
+    });
+
+    var bom = "\uFEFF";
+    var blob = new Blob([bom + csvLines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    var dateStr = selSnap ? new Date(selSnap.snapshot_date).toISOString().slice(0, 10) : "export";
+    a.href = url;
+    a.download = "stany_magazynowe_" + dateStr + ".csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   var data = selSnap ? getMerged() : [];
+  var warehouses = [];
+  var whSet = {};
+  items.forEach(function(i) { if (i.warehouse && !whSet[i.warehouse]) { whSet[i.warehouse] = true; warehouses.push(i.warehouse); } });
+  warehouses.sort();
   var totalStock = data.reduce(function(s, i) { return s + (i.stock || 0); }, 0);
   var totalValue = data.reduce(function(s, i) { return s + (i.stock || 0) * (i.price || 0); }, 0);
   var zeroStock = data.filter(function(i) { return i.stock === 0; }).length;
   var sortArrow = function(col) { return sortBy === col ? (sortDir === "asc" ? " ↑" : " ↓") : ""; };
 
-  var sqlCode = "-- Uruchom w Supabase SQL Editor:\n\nCREATE TABLE inventory_snapshots (\n  id BIGSERIAL PRIMARY KEY,\n  snapshot_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  fetched_by TEXT DEFAULT 'manual'\n);\n\nCREATE TABLE inventory_items (\n  id BIGSERIAL PRIMARY KEY,\n  snapshot_id BIGINT REFERENCES inventory_snapshots(id) ON DELETE CASCADE,\n  product_id TEXT NOT NULL,\n  sku TEXT,\n  name TEXT,\n  ean TEXT,\n  stock INTEGER NOT NULL DEFAULT 0,\n  price NUMERIC(12,2),\n  variant_id TEXT\n);\n\nCREATE INDEX idx_items_snapshot ON inventory_items(snapshot_id);\nCREATE INDEX idx_items_product ON inventory_items(product_id);\nCREATE INDEX idx_snapshots_date ON inventory_snapshots(snapshot_date);";
+  var sqlCode = "-- Uruchom w Supabase SQL Editor:\n\nCREATE TABLE inventory_snapshots (\n  id BIGSERIAL PRIMARY KEY,\n  snapshot_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  fetched_by TEXT DEFAULT 'manual'\n);\n\nCREATE TABLE inventory_items (\n  id BIGSERIAL PRIMARY KEY,\n  snapshot_id BIGINT REFERENCES inventory_snapshots(id) ON DELETE CASCADE,\n  product_id TEXT NOT NULL,\n  sku TEXT,\n  name TEXT,\n  ean TEXT,\n  stock INTEGER NOT NULL DEFAULT 0,\n  price NUMERIC(12,2),\n  warehouse TEXT,\n  variant_id TEXT\n);\n\nCREATE INDEX idx_items_snapshot ON inventory_items(snapshot_id);\nCREATE INDEX idx_items_product ON inventory_items(product_id);\nCREATE INDEX idx_snapshots_date ON inventory_snapshots(snapshot_date);\n\n-- Jesli tabele juz istnieja, dodaj kolumne:\n-- ALTER TABLE inventory_items ADD COLUMN warehouse TEXT;";
 
   var cronCode = "-- Supabase Dashboard: Database > Extensions > pg_cron (wlacz)\n-- Potem w SQL Editor:\n\nSELECT cron.schedule(\n  'monthly-inventory-snapshot',\n  '0 6 1 * *',\n  -- 1. dnia miesiaca o 6:00 UTC\n  'SELECT net.http_post(\n    url := your_edge_function_url,\n    headers := your_auth_headers\n  );'\n);";
 
@@ -313,10 +356,21 @@ export default function InventoryTracker() {
                   <input style={inputSt} placeholder="Nazwa lub SKU..." value={search}
                     onChange={function(e) { setSearch(e.target.value); }} />
                 </div>
+                {warehouses.length > 1 && (
+                  <div style={{ minWidth: 160 }}>
+                    <label style={labelSt}>Magazyn</label>
+                    <select value={warehouseFilter} onChange={function(e) { setWarehouseFilter(e.target.value); }} style={inputSt}>
+                      <option value="">-- wszystkie --</option>
+                      {warehouses.map(function(w) {
+                        return <option key={w} value={w}>{w}</option>;
+                      })}
+                    </select>
+                  </div>
+                )}
               </div>
 
               {selSnap && data.length > 0 && (
-                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap", alignItems: "stretch" }}>
                   {[
                     { l: "Produktow", v: data.length, c: "#6366f1" },
                     { l: "Laczny stan", v: totalStock.toLocaleString("pl"), c: "#0ea5e9" },
@@ -330,6 +384,13 @@ export default function InventoryTracker() {
                       </div>
                     );
                   })}
+                  <button onClick={downloadCSV} style={{
+                    padding: "12px 20px", background: "rgba(99,102,241,0.12)", border: "1px solid rgba(99,102,241,0.3)",
+                    borderRadius: 10, color: "#a5b4fc", cursor: "pointer", fontFamily: "monospace",
+                    fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 8,
+                    whiteSpace: "nowrap" }}>
+                    Pobierz CSV
+                  </button>
                 </div>
               )}
 
@@ -344,6 +405,7 @@ export default function InventoryTracker() {
                           { k: "sku", l: "SKU", a: "left" },
                           { k: "name", l: "Nazwa", a: "left" },
                           { k: "ean", l: "EAN", a: "left" },
+                          { k: "warehouse", l: "Magazyn", a: "left" },
                           { k: "stock", l: "Stan", a: "right" },
                         ].concat(cmpSnap ? [
                           { k: "prev", l: "Poprz.", a: "right" },
@@ -372,6 +434,7 @@ export default function InventoryTracker() {
                             <td style={{ padding: "7px 12px", color: "#8892b0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>{item.sku}</td>
                             <td style={{ padding: "7px 12px", color: "#ccd6f6", borderBottom: "1px solid rgba(255,255,255,0.03)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</td>
                             <td style={{ padding: "7px 12px", color: "#8892b0", borderBottom: "1px solid rgba(255,255,255,0.03)", fontSize: 11 }}>{item.ean}</td>
+                            <td style={{ padding: "7px 12px", color: "#8892b0", borderBottom: "1px solid rgba(255,255,255,0.03)", fontSize: 11 }}>{item.warehouse}</td>
                             <td style={{ padding: "7px 12px", textAlign: "right", fontWeight: 700, borderBottom: "1px solid rgba(255,255,255,0.03)", color: sc }}>{item.stock}</td>
                             {cmpSnap && (
                               <>
